@@ -1,0 +1,9 @@
+replicaCount: 2 # Levantaremos 2 pods para alta disponibilidad
+
+image:
+  repository: nginx # Esto lo reemplazará GitHub Actions dinámicamente con tu ACR
+  tag: "latest"     # Esto también lo reemplazará GitHub Actions
+
+service:
+  type: LoadBalancer # Esto le pedirá a Azure una IP Pública
+  port: 80

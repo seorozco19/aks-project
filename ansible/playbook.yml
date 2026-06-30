@@ -1,0 +1,10 @@
+- name: Preparar el clúster de AKS
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Crear namespace 'produccion'
+      kubernetes.core.k8s:
+        name: produccion
+        api_version: v1
+        kind: Namespace
+        state: present

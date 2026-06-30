@@ -1,0 +1,105 @@
+name: AKS GitOps Pipeline (OIDC)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Acción a realizar'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+        - deploy
+        - destroy
+
+# 🟢 CRÍTICO PARA OIDC: Permisos para generar el token de identidad
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_WORKING_DIR: ./terraform
+  ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+  ARM_USE_OIDC: "true" # 🟢 Le dice a Terraform que autentique vía OIDC sin secret
+
+jobs:
+  deploy_or_destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Instalar dependencias para Ansible
+        if: github.event.inputs.action != 'destroy'
+        run: |
+          pip install kubernetes
+          ansible-galaxy install -r ansible/requirements.yml
+
+      # 🟢 Login en Azure usando OIDC (Ya no usa creds de JSON ni secretos)
+      - name: Login en Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: Configurar Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      # ==========================================
+      # RUTA 1: DESTROY
+      # ==========================================
+      - name: Terraform Destroy
+        if: github.event.inputs.action == 'destroy'
+        run: terraform destroy -auto-approve
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      # ==========================================
+      # RUTA 2: DEPLOY (Infraestructura -> Docker -> Helm)
+      # ==========================================
+      - name: Terraform Apply
+        if: github.event.inputs.action != 'destroy'
+        run: terraform apply -auto-approve
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+      - name: Obtener variables de Terraform
+        if: github.event.inputs.action != 'destroy'
+        id: tf_outputs
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          echo "ACR_NAME=$(terraform output -raw container_registry_name)" >> $GITHUB_ENV
+          echo "ACR_LOGIN_SERVER=$(terraform output -raw container_registry_login_server)" >> $GITHUB_ENV
+          echo "AKS_NAME=$(terraform output -raw kubernetes_cluster_name)" >> $GITHUB_ENV
+          echo "RG_NAME=$(terraform output -raw resource_group_name)" >> $GITHUB_ENV
+
+      - name: Obtener credenciales de AKS (kubeconfig)
+        if: github.event.inputs.action != 'destroy'
+        run: az aks get-credentials --resource-group ${{ env.RG_NAME }} --name ${{ env.AKS_NAME }} --overwrite-existing
+
+      - name: Login en ACR, Build y Push de Docker
+        if: github.event.inputs.action != 'destroy'
+        run: |
+          az acr login --name ${{ env.ACR_NAME }}
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/devops-app:${{ github.sha }} ./app
+          docker push ${{ env.ACR_LOGIN_SERVER }}/devops-app:${{ github.sha }}
+
+      - name: Ejecutar Ansible (Crear Namespace)
+        if: github.event.inputs.action != 'destroy'
+        run: ansible-playbook ansible/playbook.yml
+
+      - name: Instalar con Helm
+        if: github.event.inputs.action != 'destroy'
+        run: |
+          helm upgrade --install mi-app ./helm-chart \
+            --namespace produccion \
+            --set image.repository=${{ env.ACR_LOGIN_SERVER }}/devops-app \
+            --set image.tag=${{ github.sha }}
