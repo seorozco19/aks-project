@@ -37,7 +37,7 @@ jobs:
       - name: Instalar dependencias para Ansible
         if: github.event.inputs.action != 'destroy'
         run: |
-          pip install kubernetes
+          pipx inject ansible-core kubernetes
           ansible-galaxy install -r ansible/requirements.yml
 
       # 🟢 Login en Azure usando OIDC (Ya no usa creds de JSON ni secretos)
